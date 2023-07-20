@@ -1,0 +1,82 @@
+#!/bin/bash -e
+
+do_build() {
+  local debug=
+  if [[ "$1" == "debug" ]]; then
+    debug=true
+  fi
+  local out=build_output
+  if [[ ! -d ${out}/venv ]]; then
+    python3 -m venv ${out}/venv
+  fi
+  if [[ "$VIRTUAL_ENV" != ${out}/venv ]]; then
+    source ${out}/venv/bin/activate
+  fi
+
+  poetry install --sync
+  local debug_args=
+  if [[ -n $debug ]]; then
+    debug_args=--debug=all
+  fi
+  pyinstaller main.py \
+    --onefile --noconfirm \
+    $debug_args \
+    --name bundle \
+    --paths ${out}/venv/lib/python3.11/site-packages \
+    --workpath build_output/pybuild \
+    --distpath build_output/pydist
+
+  static=${out}/static
+  mkdir -p ${static}
+
+  debug_args=--loglevel=INFO
+  if [[ -n $debug ]]; then
+    debug_args=--debug
+  fi
+  staticx $debug_args ${out}/pydist/bundle ${static}/bundle
+
+  # We don't need the virtualenv after this point
+  deactivate
+}
+
+docker_args="$@"
+if [[ "$1" == "in_docker" || "$CI" == "true" ]]; then
+  # only runs in the docker image
+  if [[ "$1" == "in_docker" ]]; then
+    shift
+  fi
+  do_build $@
+else
+  # only runs outside docker
+  source ./docker/common.inc
+
+  cmd="./build in_docker"
+  if [[ "$1" == "debug-docker" ]]; then
+    # Docker debug mode puts you into the build container.
+    # All cmdline args are passed to the `docker run` command,
+    # and `bash` is run in the container with no args.
+    shift
+    docker_args="$@"
+    cmd=bash
+  elif [[ "$1" == "debug" ]]; then
+    # Debug mode runs the build with pyinstaller and staticx in debug mode
+    # (see exact flags above in do_build)
+    shift
+    docker_args="$@"
+    cmd="$cmd debug"
+  fi
+
+  CWD=$(pwd)
+  mkdir -p build_output/pydist build_output/pybuild build_output/pypoetry
+  docker run \
+    --rm -it \
+    --platform=linux/amd64 \
+    $docker_args \
+    --mount "type=bind,src=${CWD}/pyproject.toml,dst=/src/pyproject.toml,readonly" \
+    --mount "type=bind,src=${CWD}/poetry.lock,dst=/src/poetry.lock,readonly" \
+    --mount "type=bind,src=${CWD}/main.py,dst=/src/main.py,readonly" \
+    --mount "type=bind,src=${CWD}/build,dst=/src/build,readonly" \
+    --mount "type=bind,src=${CWD}/build_output,dst=/src/build_output" \
+    ${build_image}:${build_tag} \
+    $cmd
+fi
